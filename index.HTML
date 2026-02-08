@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>The Bullwhip Effect - Supply Chain Simulation</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+    * { font-family: 'Inter', sans-serif; }
+    body { margin: 0; padding: 0; overflow-x: hidden; }
+    .animate-pulse-slow { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+    .loading-spinner {
+      border: 3px solid #f3f3f3; border-top: 3px solid #3B82F6; border-radius: 50%;
+      width: 40px; height: 40px; animation: spin 1s linear infinite;
+    }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  </style>
+  
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <script src="https://unpkg.com/lucide-react@0.263.1/dist/umd/lucide-react.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // --- 1. Game Engine Logic ---
+    class GameEngine {
+      constructor(roles, playerName) {
+        this.roles = roles;
+        this.playerName = playerName;
+        this.currentRound = 0;
+        this.playerRoleHistory = [];
+        this.entities = {};
+        roles.forEach(role => {
+          this.entities[role.id] = {
+            id: role.id, name: role.name, inventory: 12,
+            incomingOrders: [], outgoingOrders: [],
+            incomingShipments: [], outgoingShipments: [],
+            orderHistory: [], inventoryHistory: [12],
+            stockoutCosts: 0, holdingCosts: 0, unfulfilledDemand: 0
+          };
+        });
+        this.demandTrend = this.generateDemandTrend();
+      }
+
+      generateDemandTrend() {
+        const trend = [];
+        for (let i = 0; i < 5; i++) trend.push({ min: 4, max: 6, volatility: 0.1 });
+        for (let i = 0; i < 4; i++) trend.push({ min: 5 + i, max: 7 + i, volatility: 0.15 });
+        for (let i = 0; i < 3; i++) trend.push({ min: 8, max: 12, volatility: 0.2 });
+        for (let i = 0; i < 3; i++) trend.push({ min: 6 - i, max: 8 - i, volatility: 0.15 });
+        for (let i = 0; i < 3; i++) trend.push({ min: 4, max: 6, volatility: 0.1 });
+        for (let i = 0; i < 2; i++) trend.push({ min: 7, max: 10, volatility: 0.2 });
+        return trend;
+      }
+
+      getCustomerDemand(round) {
+        if (round < 1 || round > 20) return 0;
+        const phase = this.demandTrend[round - 1];
+        const base = Math.floor(Math.random() * (phase.max - phase.min + 1)) + phase.min;
+        const noise = (Math.random() - 0.5) * 2 * phase.volatility * base;
+        return Math.max(0, Math.round(base + noise));
+      }
+
+      assignRandomRole(round) {
+        const availableRoles = [...this.roles];
+        const randomIndex = Math.floor(Math.random() * availableRoles.length);
+        const selectedRole = availableRoles[randomIndex];
+        this.playerRoleHistory.push({ round, role: selectedRole.id });
+        return selectedRole;
+      }
+
+      getRoundState(round, roleId) {
+        const entity = this.entities[roleId];
+        return {
+          inventory: entity.inventory,
+          pendingOrders: entity.incomingOrders.slice(0, 1),
+          incomingShipments: entity.incomingShipments,
+          orderHistory: entity.orderHistory.slice(-10)
+        };
+      }
+
+      processPlayerOrder(roleId, quantity, round) {
+        const entity = this.entities[roleId];
+        const incomingOrder = entity.incomingOrders.shift() || 0;
+        const fulfilled = Math.min(incomingOrder, entity.inventory);
+        const unfulfilled = incomingOrder - fulfilled;
+        
+        entity.inventory -= fulfilled;
+        entity.unfulfilledDemand += unfulfilled;
+        
+        if (entity.incomingShipments.length >= 2) {
+          entity.inventory += entity.incomingShipments.shift();
+        }
+        
+        entity.outgoingOrders.push(quantity);
+        entity.orderHistory.push(incomingOrder);
+        
+        const stockoutCost = unfulfilled * 1.0;
+        const holdingCost = entity.inventory * 0.5;
+        
+        entity.stockoutCosts += stockoutCost;
+        entity.holdingCosts += holdingCost;
+        entity.inventoryHistory.push(entity.inventory);
+        
+        this.processAIEntities(round, roleId);
+        
+        return { newInventory: entity.inventory, stockoutCost, holdingCost, fulfilled, unfulfilled };
+      }
+
+      processAIEntities(round, playerRoleId) {
+        const roleOrder = ['retailer', 'distributor', 'wholesaler', 'manufacturer', 'supplier'];
+        roleOrder.forEach(roleId => {
+          if (roleId === playerRoleId) return;
+          const entity = this.entities[roleId];
+          let incomingOrder;
+          
+          if (roleId === 'retailer') {
+            incomingOrder = this.getCustomerDemand(round);
+          } else {
+            const downstreamRoleId = roleOrder[roleOrder.indexOf(roleId) - 1];
+            incomingOrder = this.entities[downstreamRoleId].outgoingOrders.shift() || 0;
+          }
+          
+          entity.incomingOrders.push(incomingOrder);
+          const orderToProcess = entity.incomingOrders.shift() || 0;
+          const fulfilled = Math.min(orderToProcess, entity.inventory);
+          const unfulfilled = orderToProcess - fulfilled;
+          
+          entity.inventory -= fulfilled;
+          entity.unfulfilledDemand += unfulfilled;
+          
+          if (entity.incomingShipments.length >= 2) {
+            entity.inventory += entity.incomingShipments.shift();
+          }
+          
+          // Simple AI Logic
+          let orderQuantity = orderToProcess; 
+          if (entity.inventory < 5) orderQuantity = Math.ceil(orderQuantity * 1.2);
+          if (entity.inventory > 15) orderQuantity = Math.floor(orderQuantity * 0.8);
+          
+          entity.outgoingOrders.push(orderQuantity);
+          entity.orderHistory.push(orderToProcess);
+          entity.stockoutCosts += unfulfilled * 1.0;
+          entity.holdingCosts += entity.inventory * 0.5;
+          entity.inventoryHistory.push(entity.inventory);
+          
+          if (roleId !== 'retailer') {
+            const downstreamRoleId = roleOrder[roleOrder.indexOf(roleId) - 1];
+            this.entities[downstreamRoleId].incomingShipments.push(fulfilled);
+          }
+        });
+        
+        const supplier = this.entities['supplier'];
+        const manuf = this.entities['manufacturer'];
+        manuf.incomingShipments.push(supplier.incomingOrders[supplier.incomingOrders.length - 1] || 0);
+      }
+
+      generateForecast(roleId, round) {
+        const entity = this.entities[roleId];
+        const recent = entity.orderHistory.slice(-3);
+        if (recent.length === 0) return [4, 8];
+        const avg = recent.reduce((a, b) => a + b, 0) / recent.length;
+        return [Math.floor(avg * 0.8), Math.ceil(avg * 1.2)];
+      }
+
+      getFinalResults() {
+        return {
+          rankings: Object.keys(this.entities).map(roleId => {
+            const ent = this.entities[roleId];
+            const role = this.roles.find(r => r.id === roleId);
+            return {
+              roleId, role: role.name,
+              totalCost: ent.stockoutCosts + ent.holdingCosts,
+              stockoutCosts: ent.stockoutCosts, holdingCosts: ent.holdingCosts,
+              responsibilityScore: 0, // Simplified
+              avgInventory: ent.inventoryHistory.reduce((a, b) => a + b, 0) / ent.inventoryHistory.length
+            };
+          }).sort((a, b) => a.totalCost - b.totalCost),
+          inventoryHistory: Object.fromEntries(Object.keys(this.entities).map(k => [k, this.entities[k].inventoryHistory]))
+        };
+      }
+    }
+
+    // --- 2. Score Calculator ---
+    class ScoreCalculator {
+      static calculateBullwhipMetrics(entities, roleOrder) {
+        const metrics = {};
+        roleOrder.forEach((roleId, index) => {
+          const entity = entities[roleId];
+          const orders = entity.orderHistory || [];
+          if (orders.length === 0) {
+             metrics[roleId] = { bullwhipRatio: 1 };
+             return;
+          }
+          const mean = orders.reduce((a, b) => a + b, 0) / orders.length;
+          const variance = orders.reduce((sum, o) => sum + Math.pow(o - mean, 2), 0) / orders.length;
+          
+          if (index > 0) {
+            const downstreamId = roleOrder[index - 1];
+            const downVar = metrics[downstreamId]?.variance || 1;
+            metrics[roleId] = { variance, bullwhipRatio: variance / (downVar || 1) };
+          } else {
+            metrics[roleId] = { variance, bullwhipRatio: 1 };
+          }
+        });
+        return metrics;
+      }
+    }
+
+    // --- 3. React Components ---
+    const { useState, useEffect } = React;
+    
+    // Fix: Access Lucide icons from the global 'lucideReact' object
+    const { 
+      Play, Info, User, TrendingUp, Package, Truck, 
+      Factory, Warehouse, Wheat, Store, CheckCircle, 
+      Lightbulb, Award, BarChart, LineChart, Target, DollarSign 
+    } = window.lucideReact || window.lucide;
+
+    const BullwhipEffectGame = () => {
+      const [gameState, setGameState] = useState('menu');
+      const [playerName, setPlayerName] = useState(localStorage.getItem('bullwhipPlayerName') || '');
+      const [currentRound, setCurrentRound] = useState(0);
+      const [currentRole, setCurrentRole] = useState(null);
+      const [gameEngine, setGameEngine] = useState(null);
+      const [inventory, setInventory] = useState(0);
+      const [pendingOrders, setPendingOrders] = useState([]);
+      const [incomingShipments, setIncomingShipments] = useState([]);
+      const [costs, setCosts] = useState({ stockout: 0, holding: 0, total: 0 });
+      const [forecast, setForecast] = useState([]);
+      const [orderQuantity, setOrderQuantity] = useState(0);
+      const [processing, setProcessing] = useState(false);
+      const [orderHistory, setOrderHistory] = useState([]);
+
+      const ROLES = [
+        { id: 'retailer', name: 'Retail Store', icon: Store, color: '#3B82F6' },
+        { id: 'distributor', name: 'Distributor', icon: Truck, color: '#8B5CF6' },
+        { id: 'wholesaler', name: 'Wholesaler', icon: Warehouse, color: '#EC4899' },
+        { id: 'manufacturer', name: 'Brewery', icon: Factory, color: '#F59E0B' },
+        { id: 'supplier', name: 'Barley Farm', icon: Wheat, color: '#10B981' }
+      ];
+
+      useEffect(() => {
+        if (gameState === 'playing' && !gameEngine) {
+          const engine = new GameEngine(ROLES, playerName);
+          setGameEngine(engine);
+          startNewRound(engine, 1);
+        }
+      }, [gameState]);
+
+      const startGame = () => {
+        if (playerName.trim()) {
+          localStorage.setItem('bullwhipPlayerName', playerName);
+          setGameState('playing');
+          setCosts({ stockout: 0, holding: 0, total: 0 });
+        }
+      };
+
+      const startNewRound = (engine, roundNum) => {
+        setCurrentRound(roundNum);
+        const role = engine.assignRandomRole(roundNum);
+        setCurrentRole(role);
+        const state = engine.getRoundState(roundNum, role.id);
+        setInventory(state.inventory);
+        setPendingOrders(state.pendingOrders);
+        setIncomingShipments(state.incomingShipments);
+        setOrderHistory(state.orderHistory);
+        setForecast(engine.generateForecast(role.id, roundNum));
+        setOrderQuantity(state.pendingOrders[0] || 0);
+      };
+
+      const placeOrder = (quantity) => {
+        if (!gameEngine || processing) return;
+        setProcessing(true);
+        const result = gameEngine.processPlayerOrder(currentRole.id, quantity, currentRound);
+        setInventory(result.newInventory);
+        setCosts(prev => ({
+          stockout: prev.stockout + result.stockoutCost,
+          holding: prev.holding + result.holdingCost,
+          total: prev.total + result.stockoutCost + result.holdingCost
+        }));
+        
+        setTimeout(() => {
+          setProcessing(false);
+          if (currentRound < 20) {
+            startNewRound(gameEngine, currentRound + 1);
+          } else {
+            setGameState('results');
+          }
+        }, 1500);
+      };
+
+      if (gameState === 'menu') {
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 flex items-center justify-center p-4">
+            <div className="max-w-2xl w-full bg-white rounded-2xl shadow-xl p-8 text-center">
+              <TrendingUp className="w-16 h-16 text-blue-600 mx-auto mb-4" />
+              <h1 className="text-4xl font-bold text-gray-800 mb-2">The Bullwhip Effect</h1>
+              <p className="text-gray-600 mb-8">Supply Chain Simulation</p>
+              <input 
+                type="text" value={playerName} onChange={e => setPlayerName(e.target.value)}
+                placeholder="Enter your name"
+                className="w-full px-4 py-3 border-2 rounded-lg mb-4 text-center"
+              />
+              <button onClick={startGame} disabled={!playerName.trim()} className="w-full bg-blue-600 text-white py-4 rounded-lg font-bold text-lg hover:bg-blue-700 disabled:opacity-50">
+                Start Game
+              </button>
+            </div>
+          </div>
+        );
+      }
+
+      if (gameState === 'playing' && currentRole) {
+        const RoleIcon = currentRole.icon;
+        return (
+          <div className="min-h-screen bg-slate-50 p-6">
+            <div className="max-w-6xl mx-auto">
+              {/* Header */}
+              <div className="bg-white rounded-xl shadow p-6 mb-6 flex justify-between items-center">
+                <div>
+                  <h2 className="text-3xl font-bold">Round {currentRound} / 20</h2>
+                  <div className="flex items-center gap-2 text-xl" style={{color: currentRole.color}}>
+                    <RoleIcon /> <span>{currentRole.name}</span>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="text-sm text-gray-500">Total Cost</div>
+                  <div className="text-3xl font-bold text-red-600">${costs.total.toFixed(2)}</div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Visual Chain */}
+                <div className="lg:col-span-2 bg-white rounded-xl shadow p-6 flex flex-col justify-center items-center min-h-[400px]">
+                   <h3 className="font-bold text-gray-400 mb-8">SUPPLY CHAIN MAP</h3>
+                   <div className="flex flex-wrap gap-4 justify-center">
+                     {ROLES.map(r => {
+                       const Icon = r.icon;
+                       const isYou = currentRole.id === r.id;
+                       return (
+                         <div key={r.id} className={`flex flex-col items-center p-4 rounded-xl ${isYou ? 'bg-blue-50 border-2 border-blue-500 transform scale-110' : 'opacity-50'}`}>
+                           <Icon className="w-8 h-8" style={{color: r.color}} />
+                           <span className="text-xs font-bold mt-2">{r.name}</span>
+                           {isYou && <span className="text-xs text-blue-600 font-bold">YOU</span>}
+                         </div>
+                       )
+                     })}
+                   </div>
+                </div>
+
+                {/* Controls */}
+                <div className="space-y-4">
+                  <div className="bg-white p-6 rounded-xl shadow text-center">
+                    <h3 className="text-gray-500 text-sm uppercase">Your Inventory</h3>
+                    <div className="text-5xl font-bold text-blue-600">{inventory}</div>
+                  </div>
+                  
+                  <div className="bg-white p-6 rounded-xl shadow">
+                    <div className="flex justify-between mb-2">
+                      <span>Incoming Order:</span>
+                      <span className="font-bold text-orange-600">{pendingOrders[0] || 0}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Arriving Stock:</span>
+                      <span className="font-bold text-green-600">{incomingShipments.reduce((a,b)=>a+b,0)}</span>
+                    </div>
+                  </div>
+
+                  <div className="bg-indigo-600 p-6 rounded-xl shadow text-white">
+                    <label className="block text-sm mb-2">Quantity to Order (Forecast: {forecast[0]}-{forecast[1]})</label>
+                    <input 
+                      type="number" value={orderQuantity} 
+                      onChange={e => setOrderQuantity(Math.max(0, parseInt(e.target.value)||0))}
+                      className="w-full p-3 rounded text-black text-center text-xl font-bold mb-4"
+                      disabled={processing}
+                    />
+                    <button 
+                      onClick={() => placeOrder(orderQuantity)} 
+                      disabled={processing}
+                      className="w-full bg-white text-indigo-600 font-bold py-3 rounded hover:bg-gray-100 disabled:opacity-50"
+                    >
+                      {processing ? 'Processing...' : 'Submit Order'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      if (gameState === 'results' && gameEngine) {
+        const results = gameEngine.getFinalResults();
+        const metrics = ScoreCalculator.calculateBullwhipMetrics(gameEngine.entities, ROLES.map(r=>r.id));
+        
+        return (
+          <div className="min-h-screen bg-slate-50 p-8 flex justify-center">
+            <div className="max-w-4xl w-full bg-white rounded-2xl shadow-2xl p-8">
+              <h1 className="text-4xl font-bold text-center mb-2">Simulation Complete</h1>
+              <div className="bg-blue-600 text-white p-6 rounded-xl mb-8 flex justify-between items-center">
+                <div>
+                   <h2 className="text-2xl font-bold">{playerName}'s Results</h2>
+                   <div className="opacity-80">Total Cost</div>
+                </div>
+                <div className="text-4xl font-bold">${costs.total.toFixed(2)}</div>
+              </div>
+              
+              <h3 className="text-xl font-bold mb-4">Rankings & Analysis</h3>
+              <div className="space-y-3 mb-8">
+                {results.rankings.map((r, i) => (
+                  <div key={r.roleId} className="flex justify-between items-center p-4 bg-gray-50 rounded">
+                    <div className="flex items-center gap-4">
+                      <span className="font-bold text-gray-400 w-6">#{i+1}</span>
+                      <span className="font-bold">{r.role}</span>
+                    </div>
+                    <div className="text-right">
+                       <div className="font-bold text-red-600">${r.totalCost.toFixed(2)}</div>
+                       <div className="text-xs text-gray-500">Bullwhip: {metrics[r.roleId]?.bullwhipRatio.toFixed(2)}x</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              
+              <button onClick={() => window.location.reload()} className="w-full bg-gray-800 text-white py-4 rounded-lg font-bold">
+                Play Again
+              </button>
+            </div>
+          </div>
+        );
+      }
+      return null;
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<BullwhipEffectGame />);
+  </script>
+</body>
+</html>
